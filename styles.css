@@ -212,6 +212,26 @@ body {
   animation-delay: 0.3s;
 }
 
+.chatbot-suggest-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.chatbot-suggest {
+  border: 1px solid var(--chat-border);
+  background: white;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.chatbot-suggest:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
 @keyframes bounce {
 
   0%,

@@ -72,7 +72,15 @@ function initChatbotWidget() {
     // First-time greeting
     if (!panel.dataset.greeted) {
       panel.dataset.greeted = "true";
-      addBotMessage("Hey! Ask me about hours, pricing, booking, or services.");
+      addBotMessage({
+        text: "Hey! Ask me about hours, pricing, booking, or services.",
+        suggestions: [
+          { label: "Hours", message: "What are your hours?" },
+          { label: "Pricing", message: "How much does it cost?" },
+          { label: "Booking", message: "How do I book?" },
+          { label: "Services", message: "What services do you offer?" },
+        ],
+      });
     }
   });
 
@@ -84,23 +92,30 @@ function initChatbotWidget() {
     e.preventDefault();
     const text = input.value.trim();
     if (!text) return;
-
     input.value = "";
-    addUserMessage(text);
-
-    // Optional typing indicator
-    const typingId = addTypingIndicator();
-
-    try {
-      const reply = await chatProvider(text);
-      removeTypingIndicator(typingId);
-      addBotMessage(reply);
-    } catch (err) {
-      removeTypingIndicator(typingId);
-      addBotMessage("Sorry — something went wrong. Try again.");
-      console.error(err);
-    }
+    await handleSendMessage(text);
   });
+}
+
+/* A reusable send function (also used by suggestion buttons) */
+async function handleSendMessage(text) {
+  const input = document.getElementById("chatbot-input");
+
+  addUserMessage(text);
+
+  const typingId = addTypingIndicator();
+
+  try {
+    const reply = await chatProvider(text);
+    removeTypingIndicator(typingId);
+    addBotMessage(reply);
+  } catch (err) {
+    removeTypingIndicator(typingId);
+    addBotMessage("Sorry — something went wrong. Try again.");
+    console.error(err);
+  } finally {
+    input?.focus();
+  }
 }
 
 /* ---------------------------
@@ -110,11 +125,11 @@ function addUserMessage(text) {
   addMessageRow("user", text);
 }
 
-function addBotMessage(text) {
-  addMessageRow("bot", text);
+function addBotMessage(content) {
+  addMessageRow("bot", content);
 }
 
-function addMessageRow(role, text) {
+function addMessageRow(role, content) {
   const messages = document.getElementById("chatbot-messages");
   const time = new Date().toLocaleTimeString([], {
     hour: "2-digit",
@@ -124,15 +139,41 @@ function addMessageRow(role, text) {
   const row = document.createElement("div");
   row.className = `chatbot-row ${role}`;
 
+  // If bot message is an object, we can render rich UI (text + suggestions)
+  const payload = typeof content === "string" ? { text: content } : content;
+
+  // USER text is always escaped.
+  // BOT text can be rendered as HTML *only if we generated it ourselves*.
+  const bubbleHtml =
+    role === "user" ? escapeHtml(payload.text) : renderBotText(payload.text);
+
+  const suggestionsHtml =
+    role === "bot" && Array.isArray(payload.suggestions)
+      ? renderSuggestions(payload.suggestions)
+      : "";
+
   row.innerHTML = `
     <div>
-      <div class="chatbot-bubble">${escapeHtml(text)}</div>
+      <div class="chatbot-bubble">
+        <div>${bubbleHtml}</div>
+        ${suggestionsHtml}
+      </div>
       <div class="chatbot-meta">${time}</div>
     </div>
   `;
 
   messages.appendChild(row);
   messages.scrollTop = messages.scrollHeight;
+
+  // Wire up suggestion buttons (if any)
+  if (role === "bot" && Array.isArray(payload.suggestions)) {
+    row.querySelectorAll("[data-suggest]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const suggestedText = btn.getAttribute("data-suggest");
+        await handleSendMessage(suggestedText);
+      });
+    });
+  }
 }
 
 function addTypingIndicator() {
@@ -172,6 +213,33 @@ function escapeHtml(str) {
     .replaceAll("'", "&#039;");
 }
 
+/* Allow a tiny subset of HTML we generate ourselves (links + strong).
+   For now, we keep it simple:
+   - We escape everything first
+   - Then we re-enable <strong> and <a ...> tags if present in our generated text.
+*/
+function renderBotText(text) {
+  return escapeHtml(text)
+    .replaceAll("&lt;strong&gt;", "<strong>")
+    .replaceAll("&lt;/strong&gt;", "</strong>")
+    .replaceAll("&lt;a ", "<a ")
+    .replaceAll("&lt;/a&gt;", "</a>")
+    .replaceAll("&gt;", ">");
+}
+
+function renderSuggestions(suggestions) {
+  const buttons = suggestions
+    .map(
+      (s) =>
+        `<button type="button" class="chatbot-suggest" data-suggest="${escapeHtml(
+          s.message
+        )}">${escapeHtml(s.label)}</button>`
+    )
+    .join("");
+
+  return `<div class="chatbot-suggest-row">${buttons}</div>`;
+}
+
 /* ---------------------------
    4) Chat provider (architecture)
    - This is the key “professional” seam.
@@ -198,15 +266,15 @@ async function backendChat(userText) {
   return data.reply || "No reply field returned.";
 }
 
-/* Free “local engine” for now (we’ll improve this next step) */
 /* ------------------------------------------
    FREE FAQ "response engine" (front-end only)
    - Small JSON knowledge base
    - Keyword matching with scoring
    - Basic multi-turn memory (lastTopic)
+   - Suggestions (clickable chips) for guidance
 ------------------------------------------- */
 
-// A tiny FAQ knowledge base (edit this anytime)
+// Knowledge base (edit per client)
 const FAQ_KB = [
   {
     topic: "hours",
@@ -223,9 +291,19 @@ const FAQ_KB = [
   },
   {
     topic: "pricing",
-    keywords: ["price", "pricing", "cost", "rates", "how much", "fee"],
+    keywords: [
+      "price",
+      "pricing",
+      "cost",
+      "rates",
+      "how much",
+      "fee",
+      "tattoo pricing",
+      "tattoo cost",
+      "tattoo price",
+    ],
     answer:
-      "Pricing depends on the service. Tell me what you’re looking for and I’ll point you in the right direction.",
+      "Pricing depends on the service and complexity. Tattoo pricing is usually based on size, detail, and placement.",
   },
   {
     topic: "booking",
@@ -257,47 +335,70 @@ const FAQ_KB = [
   },
 ];
 
-// Basic “memory” for multi-turn feel
+// Basic memory
 const CHAT_MEMORY = {
   lastTopic: null,
 };
 
 async function fakeApiChat(userText) {
-  // Simulate network delay (keeps the UI feeling realistic)
   await sleep(350);
-
   const input = normalize(userText);
 
-  // 1) If user gives a super short follow-up, try using lastTopic
-  // Example: user asks about pricing, bot answers, user says "what about weekends?"
+  // 1) Short follow-up uses last topic
   if (isShortFollowUp(input) && CHAT_MEMORY.lastTopic) {
     const follow = answerFromTopic(CHAT_MEMORY.lastTopic, input);
     if (follow) return follow;
   }
 
-  // 2) Score each FAQ by keyword matches
+  // 2) Find best match
   const best = findBestFaqMatch(input);
 
-  // 3) If we found a confident match, return it
+  // 3) If confident, respond
   if (best && best.score >= 1) {
     CHAT_MEMORY.lastTopic = best.faq.topic;
 
-    // Optional: add a tiny “clarifying question” behavior for certain topics
+    // Pricing: ask a clarifying question with clickable chips
     if (best.faq.topic === "pricing") {
-      return `${best.faq.answer} For example: hair, nails, skincare, or tattoo?`;
+      return {
+        text: `${best.faq.answer} Which service are you asking about?`,
+        suggestions: [
+          { label: "Tattoo", message: "Tattoo pricing" },
+          { label: "Hair", message: "Hair pricing" },
+          { label: "Nails", message: "Nail pricing" },
+          { label: "Skincare", message: "Facial pricing" },
+        ],
+      };
+    }
+
+    // Services: offer quick next steps
+    if (best.faq.topic === "services") {
+      return {
+        text: best.faq.answer,
+        suggestions: [
+          { label: "Pricing", message: "How much does it cost?" },
+          { label: "Booking", message: "How do I book?" },
+        ],
+      };
     }
 
     return best.faq.answer;
   }
 
-  // 4) Fallback
-  return "I’m not totally sure yet — can you rephrase that, or choose one: hours, pricing, booking, services?";
+  // 4) Fallback with guidance
+  return {
+    text: "I’m not totally sure yet — want to jump to a topic?",
+    suggestions: [
+      { label: "Hours", message: "What are your hours?" },
+      { label: "Pricing", message: "How much does it cost?" },
+      { label: "Booking", message: "How do I book?" },
+      { label: "Services", message: "What services do you offer?" },
+    ],
+  };
 }
 
 /* ---------------------------
    Matching helpers
 ---------------------------- */
-
 function findBestFaqMatch(input) {
   let best = null;
 
@@ -307,11 +408,10 @@ function findBestFaqMatch(input) {
     for (const kw of faq.keywords) {
       const kwNorm = normalize(kw);
 
-      // If the keyword is a phrase, we check substring match
+      // phrase match gets higher score
       if (kwNorm.includes(" ")) {
         if (input.includes(kwNorm)) score += 2;
       } else {
-        // Word match (simple but solid)
         if (hasWord(input, kwNorm)) score += 1;
       }
     }
@@ -325,7 +425,6 @@ function findBestFaqMatch(input) {
 }
 
 function answerFromTopic(topic, input) {
-  // Let a follow-up get routed to the same topic if user still mentions related words
   const faq = FAQ_KB.find((f) => f.topic === topic);
   if (!faq) return null;
 
@@ -339,9 +438,15 @@ function answerFromTopic(topic, input) {
     }
   }
 
-  // If it’s short AND doesn’t match keywords, we can still give a gentle prompt
+  // If short follow-up, give a gentle confirmation
   if (isShortFollowUp(input)) {
-    return `When you say "${input}", are you asking about ${topic}? If yes, here’s the info: ${faq.answer}`;
+    return {
+      text: `When you say "${input}", are you asking about <strong>${topic}</strong>? If yes, here’s the info: ${faq.answer}`,
+      suggestions: [
+        { label: "Yes", message: `Tell me about ${topic}` },
+        { label: "No, show topics", message: "help" },
+      ],
+    };
   }
 
   return null;
@@ -352,7 +457,6 @@ function normalize(str) {
 }
 
 function hasWord(text, word) {
-  // Avoid matching "book" inside "facebook" etc.
   const pattern = new RegExp(`\\b${escapeRegex(word)}\\b`, "i");
   return pattern.test(text);
 }
@@ -362,8 +466,6 @@ function escapeRegex(str) {
 }
 
 function isShortFollowUp(input) {
-  // Very basic: short message = likely follow-up
-  // (You can tune this later)
   const wordCount = input.split(/\s+/).filter(Boolean).length;
   return wordCount <= 4;
 }
